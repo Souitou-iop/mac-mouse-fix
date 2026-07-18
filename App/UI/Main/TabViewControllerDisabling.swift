@@ -9,7 +9,7 @@ import Foundation
 import ReactiveSwift
 import ReactiveCocoa
 
-var alwaysEnabledTabs = ["general", "about"]
+var alwaysEnabledTabs = ["general", "apps", "about"]
 
 extension TabViewController {
     

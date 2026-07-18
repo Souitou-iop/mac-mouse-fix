@@ -11,9 +11,7 @@
 /// - [Aug 2025] MMF 3 doesn't support app-specific settings, so all the 'overrides' stuff doesn't apply currently.
 /// - We're using our custom coolKeyPath API all over this class, instead of Apple's key-value-coding API (aka KVC) (See valueForKeyPath:). The main reason we do this, is so that, when we set a value at a keypPath which doesn't exist, yet using the function `setConfig(NSString *keyPath, NSObject *value)` then the keyPath is created automatically, instead of just failing. This has the benefit, of being more robust and we don't need to make sure, that all keyPaths already exist in the defaultConfig. In all the other places where we use the coolKeyPath API in this class, we only do this to stay consistent (at the time of writing). I'm not sure, whether our coolKeyPath API is slower that the KVC API. We transitioned over to coolKeyPath API without testing speed.
 /// - TODO: Test if the coolKeyPath API is slower than the KVC API and optimize
-/// - TODO: Implement callback when frontmost application changes - change settings accordingly
-///     ^ Need this when application changes but mouse doesn't move (e.g. Command-Tab). Without this the app specific settings for the new app aren't applied
-///     Maybe use NSWorkspaceDidActivateApplicationNotification?
+/// - App overrides follow the frontmost application through NSWorkspace activation notifications.
 /// iCloud sync:
 ///      [Aug 2025] `NSUbiquitousKeyValueStore` seems promising
 ///         This article says it can be used on non-MAS apps, despite what the docs claim: https://blog.scottjlittle.net/2023/05/23/icloud-keyvalue-store.html
@@ -24,6 +22,7 @@
 ///             - Will the 1 MB limit always be enough? (If it uses binary plist encoding, it's probably fine.)
 
 #import "Config.h"
+#import <AppKit/AppKit.h>
 #import "AppDelegate.h"
 #import "Scroll.h"
 #import "ButtonInputReceiver.h"
@@ -52,6 +51,25 @@
 }
 @synthesize config=_config, configWithAppOverridesApplied=_configWithAppOverridesApplied;
 
++ (NSString * _Nullable)appOverrideIdentifierForRunningApplication:(NSRunningApplication * _Nullable)application {
+    if (application.bundleIdentifier.length > 0) {
+        return application.bundleIdentifier;
+    }
+
+    NSString *path = application.bundleURL.path.stringByStandardizingPath;
+    return path.length > 0 ? [@"path:" stringByAppendingString:path] : nil;
+}
+
++ (void)applyOverridesForActiveApplication:(NSRunningApplication * _Nullable)application {
+    NSAssert(NSThread.isMainThread, @"Application overrides must be applied on the main thread.");
+
+    NSString *identifier = [self appOverrideIdentifierForRunningApplication:application] ?: @"";
+    if (![self.shared->_bundleIDOfAppWhichCausesAppOverride isEqualToString:identifier]) {
+        [self.shared loadOverridesForApp:identifier];
+        [self updateDerivedStates];
+    }
+}
+
 #pragma mark - Init & singleton instance
 
 + (void)load_Manual {
@@ -67,6 +85,17 @@
 #if IS_HELPER
     /// Setup stuff
     [_instance setupFSEventStreamCallback];
+
+    /// Apply app-specific settings when the active application changes even if the
+    /// pointer did not move enough to produce a scroll tick.
+    [[NSWorkspace sharedWorkspace].notificationCenter addObserverForName:NSWorkspaceDidActivateApplicationNotification
+                                                                object:nil
+                                                                     queue:[NSOperationQueue mainQueue]
+                                                                usingBlock:^(NSNotification *note) {
+        NSRunningApplication *application = note.userInfo[NSWorkspaceApplicationKey];
+        [Config applyOverridesForActiveApplication:application];
+    }];
+    [Config applyOverridesForActiveApplication:NSWorkspace.sharedWorkspace.frontmostApplication];
 #endif
 }
 
@@ -91,6 +120,13 @@ static Config *_instance;
 NSObject * _Nullable config(NSString *keyPath) {
     /// Convenience function for accessing config
     NSMutableDictionary *config = Config.shared.config;
+
+#if IS_HELPER
+    if (Config.shared.configWithAppOverridesApplied != nil) {
+        config = Config.shared.configWithAppOverridesApplied;
+    }
+#endif
+
     NSObject *result = [config objectForCoolKeyPath:keyPath];
     return result;
 }
@@ -162,7 +198,8 @@ void commitConfig(void) {
     
     /// Force update of internal state, (even the active app hastn't changed)
     ///     (Not sure if we need to always do this or only after loading from file)
-    [self.shared loadOverridesForApp:@""];
+    NSString *activeAppIdentifier = self.shared->_bundleIDOfAppWhichCausesAppOverride ?: @"";
+    [self.shared loadOverridesForApp:activeAppIdentifier];
     
     /// Notify other modules
     [Remap reload];
@@ -179,11 +216,6 @@ void commitConfig(void) {
 #pragma mark - Overrides
 
 - (BOOL)loadOverridesForAppUnderMousePointerWithEvent:(CGEventRef)event {
-    
-    /// Unused in MMF 3
-    ///     Reactivate when we reimplement app-specific settings.
-    return NO;
-    
     /// Returns yes when it's made a change
     /// TODO: Add compatibility for command line executables
     /// TODO: Look into using kCGMouseEventWindowUnderMousePointer to get the window under the mouse pointer
@@ -196,14 +228,14 @@ void commitConfig(void) {
     
     /// Get bundleID
     NSRunningApplication *app = [HelperUtility appUnderMousePointerWithEvent:event];
-    NSString *bundleID = app.bundleIdentifier;
+    NSString *appIdentifier = [Config appOverrideIdentifierForRunningApplication:app] ?: @"";
     
     /// Debug
-    DDLogDebug("Loading overrides for app %@", bundleID);
+    DDLogDebug("Loading overrides for app %@", appIdentifier);
     
     /// Set internal state
-    if (![_bundleIDOfAppWhichCausesAppOverride isEqual:bundleID]) {
-        [self loadOverridesForApp:bundleID];
+    if (![_bundleIDOfAppWhichCausesAppOverride isEqual:appIdentifier]) {
+        [self loadOverridesForApp:appIdentifier];
         return YES;
     }
 #endif
@@ -212,7 +244,7 @@ void commitConfig(void) {
 }
 
 /// Applies AppOverrides from app with `bundleIdentifier` to `self->_config` and writes the result into `_configWithAppOverridesApplied`.
-- (void)loadOverridesForApp:(NSString *)bundleID {
+- (void)loadOverridesForApp:(NSString *)appIdentifier {
     
     /// Validate
     assert(runningHelper());
@@ -220,20 +252,21 @@ void commitConfig(void) {
 #if IS_HELPER
     
     /// Store app
-    _bundleIDOfAppWhichCausesAppOverride = bundleID;
+    _bundleIDOfAppWhichCausesAppOverride = [appIdentifier copy];
     
     /// Get overrides for app
     NSDictionary *overrides = [self->_config objectForKey:kMFConfigKeyAppOverrides];
     NSDictionary *overridesForThisApp;
     for (NSString *b in overrides.allKeys) {
-        if ([bundleID isEqualToString:b]) {
+        if ([appIdentifier isEqualToString:b]) {
                 overridesForThisApp = [[overrides objectForKey: b] objectForKey:@"Root"];
+                break;
         }
     }
     if (overridesForThisApp) {
         _configWithAppOverridesApplied = [[SharedUtility dictionaryWithOverridesAppliedFrom:overridesForThisApp to:self->_config] mutableCopy];
     } else {
-        _configWithAppOverridesApplied = self->_config;
+        _configWithAppOverridesApplied = [self->_config mutableCopy];
     }
 #endif
 }

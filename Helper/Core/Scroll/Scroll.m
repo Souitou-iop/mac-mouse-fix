@@ -346,7 +346,7 @@ static void heavyProcessing(CGEventRef event, int64_t scrollDeltaAxis1, int64_t 
         [ScrollUtility updateMouseDidMoveWithEvent:event];
         
         /// Update application Overrides
-        if ((NO)) { /// Unused in MMF 3
+        if ((NO)) { /// Active-app overrides are applied on the main thread by Config.
             if (!ScrollUtility.mouseDidMove) {
                 [ScrollUtility updateFrontMostAppDidChange];
                 /// Only checking this if mouse didn't move, because of || in (mouseMoved || frontMostAppChanged). For optimization. Not sure if significant.

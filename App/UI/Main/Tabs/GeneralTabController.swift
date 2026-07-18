@@ -112,6 +112,13 @@ class GeneralTabController: NSViewController {
                             ///         - The guide that `enable-timeout-toast` linked to had a comment section (https://redirect.macmousefix.com/?target=mmf-ventura-enabling-guide)
                             ///             - But this had no comments In 2025 so far [Jul 2025]
                             ///         - If we ever wanna re-install `enable-timeout-toast` we need to fix the jank first! I added an `if window.attachedSheet == nil` check below to help but it's still kinda janky [Jul 2025]
+
+                            DispatchQueue.main.asyncAfter(deadline: .now() + enableTimeout) {
+                                guard !EnabledState.shared.isEnabled(),
+                                      let window = MainAppState.shared.window,
+                                      window.attachedSheet == nil else { return }
+                                Toasts.showSimpleToast(name: "k-enable-timeout-toast")
+                            }
                         }
                         else if #available(macOS 13.0, *) {
                         
@@ -198,11 +205,8 @@ class GeneralTabController: NSViewController {
                         guard let error = error else { assert(false); return }
                         
                         
-                        if #available(macOS 13.0, *), error.domain == "SMAppServiceErrorDomain", error.code == 1 {
-                            
-                            Toasts.showSimpleToast(name: "k-is-disabled-toast")
-                        }
-                        else { assert(false) }
+                        DDLogError("Failed to enable helper: \(error)")
+                        Toasts.showSimpleToast(name: "k-is-disabled-toast")
                     }
                 })
                 

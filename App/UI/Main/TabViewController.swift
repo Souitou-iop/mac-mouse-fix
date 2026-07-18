@@ -30,6 +30,7 @@
 ///                         - Update: [Sep 2025] Changed my opinions on this. See `swiftui-test-tahoe-beta`.
 
 import Cocoa
+import UniformTypeIdentifiers
 
 class TabViewController: NSTabViewController {
     
@@ -45,7 +46,7 @@ class TabViewController: NSTabViewController {
     
     // MARK: Constants
     ///     TODO: Think about using validTabs in different places / if using it at all makes sense in the grand architecture
-    private let validTabs = ["general", "buttons", "scrolling", "about"]
+    private let validTabs = ["general", "buttons", "scrolling", "apps", "about"]
     
     private var window: ResizingTabWindow? {
         if let w = self.tabView.window as? ResizingTabWindow {
@@ -347,6 +348,23 @@ class TabViewController: NSTabViewController {
         super.viewDidLoad()
         /// Debug
         DDLogDebug("TBS tabview didLoad")
+
+        installAppOverrideTab()
+    }
+
+    private func installAppOverrideTab() {
+        guard tabViewItem(identifier: "apps") == nil else { return }
+
+        let item = NSTabViewItem(identifier: "apps")
+        let title = MFLocalizedString("apps-tab.title", comment: "Title of the tab for application-specific scrolling exclusions.")
+        item.label = title
+        if #available(macOS 11.0, *) {
+            item.image = NSImage(systemSymbolName: "square.grid.2x2", accessibilityDescription: title)
+        }
+
+        let controller = SmoothScrollExclusionTabViewController()
+        item.viewController = controller
+        insertTabViewItem(item, at: max(0, tabViewItems.count - 1))
     }
     
     override func viewWillAppear() {
@@ -542,6 +560,14 @@ class TabViewController: NSTabViewController {
         /// Resizes the window so that it fits the content of the tab.
         ///     Resizes such that center x stays the same
         
+        /// The Apps tab is created programmatically and has no storyboard-sized
+        /// view for AppKit to measure while the window is temporarily enlarged.
+        /// Keep it bounded so the measurement pass cannot retain the probe size.
+        let tabIdentifier = tabViewItem.identifier as? String
+        if tabIdentifier == "apps" {
+            tabViewSizes[tabViewItem] = NSSize(width: 420, height: 260)
+        }
+
         /// Get the stored size of the tab we're switching to
         ///     Note: The size of the general tab can change while we're in another tab (if the helper gets disabled), so we're always recalculating its size!
         var size: NSSize? = tabViewSizes[tabViewItem]
@@ -796,5 +822,302 @@ class TabViewController: NSTabViewController {
     
     @objc public func identifierOfSelectedTab() -> String? {
         return self.tabView.selectedTabViewItem?.identifier as? String
+    }
+}
+
+private final class SmoothScrollExclusionTabViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+
+    private struct ExcludedApplication {
+        let identifier: String
+        let name: String
+        let url: URL?
+    }
+
+    private let tableView = NSTableView()
+    private let scrollView = NSScrollView()
+    private let addButton = NSButton()
+    private let removeButton = NSButton()
+    private let emptyLabel = NSTextField(wrappingLabelWithString: "")
+    private var applications: [ExcludedApplication] = []
+
+    override func loadView() {
+        let root = NSView()
+        root.translatesAutoresizingMaskIntoConstraints = false
+
+        let contentContainer = NSView()
+        contentContainer.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleLabel = NSTextField(labelWithString: MFLocalizedString(
+            "apps-smooth-exclusions.title",
+            comment: "Heading above a list of apps where smooth scrolling is disabled."
+        ))
+        let detailLabel = NSTextField(wrappingLabelWithString: MFLocalizedString(
+            "apps-smooth-exclusions.detail",
+            comment: "Explains that listed apps use native scrolling instead of smooth scrolling."
+        ))
+
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        detailLabel.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        addButton.translatesAutoresizingMaskIntoConstraints = false
+        removeButton.translatesAutoresizingMaskIntoConstraints = false
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        titleLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        detailLabel.maximumNumberOfLines = 2
+
+        let addDescription = MFLocalizedString(
+            "apps-smooth-exclusions.add",
+            comment: "Tooltip for adding apps to the smooth-scrolling exclusion list."
+        )
+        let removeDescription = MFLocalizedString(
+            "apps-smooth-exclusions.remove",
+            comment: "Tooltip for removing apps from the smooth-scrolling exclusion list."
+        )
+        addButton.bezelStyle = .smallSquare
+        removeButton.bezelStyle = .smallSquare
+        addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: addDescription)
+        removeButton.image = NSImage(systemSymbolName: "minus", accessibilityDescription: removeDescription)
+        addButton.imagePosition = .imageOnly
+        removeButton.imagePosition = .imageOnly
+        addButton.toolTip = addDescription
+        removeButton.toolTip = removeDescription
+        addButton.target = self
+        addButton.action = #selector(addApplication)
+        removeButton.target = self
+        removeButton.action = #selector(removeApplication)
+        removeButton.isEnabled = false
+
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("application"))
+        column.resizingMask = .autoresizingMask
+        tableView.addTableColumn(column)
+        tableView.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+        tableView.headerView = nil
+        tableView.rowHeight = 40
+        tableView.intercellSpacing = NSSize(width: 0, height: 1)
+        tableView.backgroundColor = .clear
+        tableView.allowsMultipleSelection = true
+        tableView.dataSource = self
+        tableView.delegate = self
+
+        scrollView.documentView = tableView
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        scrollView.borderType = .bezelBorder
+
+        emptyLabel.stringValue = MFLocalizedString(
+            "apps-smooth-exclusions.empty",
+            comment: "Empty-state text for the smooth-scrolling exclusion list."
+        )
+        emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.alignment = .center
+        emptyLabel.maximumNumberOfLines = 2
+
+        let buttonRow = NSStackView(views: [addButton, removeButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 6
+        buttonRow.translatesAutoresizingMaskIntoConstraints = false
+
+        root.addSubview(contentContainer)
+        contentContainer.addSubview(titleLabel)
+        contentContainer.addSubview(detailLabel)
+        contentContainer.addSubview(scrollView)
+        contentContainer.addSubview(emptyLabel)
+        contentContainer.addSubview(buttonRow)
+
+        NSLayoutConstraint.activate([
+            root.widthAnchor.constraint(equalToConstant: 420),
+            root.heightAnchor.constraint(equalToConstant: 260),
+            contentContainer.widthAnchor.constraint(equalToConstant: 372),
+            contentContainer.heightAnchor.constraint(equalToConstant: 220),
+            contentContainer.centerXAnchor.constraint(equalTo: root.centerXAnchor),
+            contentContainer.centerYAnchor.constraint(equalTo: root.centerYAnchor),
+            titleLabel.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
+            titleLabel.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
+            titleLabel.topAnchor.constraint(equalTo: contentContainer.topAnchor),
+            detailLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            detailLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            detailLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            scrollView.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: detailLabel.bottomAnchor, constant: 12),
+            scrollView.heightAnchor.constraint(equalToConstant: 136),
+            emptyLabel.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor, constant: 24),
+            emptyLabel.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: -24),
+            emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+            buttonRow.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            buttonRow.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 8),
+            buttonRow.bottomAnchor.constraint(lessThanOrEqualTo: contentContainer.bottomAnchor),
+            addButton.widthAnchor.constraint(equalToConstant: 28),
+            removeButton.widthAnchor.constraint(equalToConstant: 28)
+        ])
+
+        self.view = root
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        reloadApplications()
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        reloadApplications()
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        applications.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let identifier = NSUserInterfaceItemIdentifier("application-cell")
+        let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView ?? makeApplicationCell(identifier: identifier)
+        let application = applications[row]
+
+        cell.textField?.stringValue = application.name
+        cell.textField?.toolTip = application.identifier
+        if let url = application.url {
+            cell.imageView?.image = NSWorkspace.shared.icon(forFile: url.path)
+        } else {
+            cell.imageView?.image = NSImage(named: NSImage.applicationIconName)
+        }
+        return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        removeButton.isEnabled = tableView.numberOfSelectedRows > 0
+    }
+
+    private func makeApplicationCell(identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {
+        let cell = NSTableCellView()
+        cell.identifier = identifier
+
+        let icon = NSImageView()
+        let label = NSTextField(labelWithString: "")
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        label.translatesAutoresizingMaskIntoConstraints = false
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        label.lineBreakMode = .byTruncatingTail
+
+        cell.addSubview(icon)
+        cell.addSubview(label)
+        cell.imageView = icon
+        cell.textField = label
+
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+            icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 26),
+            icon.heightAnchor.constraint(equalToConstant: 26),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
+            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        return cell
+    }
+
+    private func escapedIdentifier(_ identifier: String) -> String {
+        identifier.replacingOccurrences(of: ".", with: "\\.")
+    }
+
+    private func appOverrides() -> [String: Any] {
+        (Config.shared().config["AppOverrides"] as? [String: Any]) ?? [:]
+    }
+
+    private func applicationURL(for identifier: String) -> URL? {
+        if identifier.hasPrefix("path:") {
+            return URL(fileURLWithPath: String(identifier.dropFirst(5)))
+        }
+        return NSWorkspace.shared.urlForApplication(withBundleIdentifier: identifier)
+    }
+
+    private func displayName(for identifier: String, url: URL?) -> String {
+        if let url,
+           let bundle = Bundle(url: url),
+           let name = bundle.localizedInfoDictionary?["CFBundleDisplayName"] as? String ?? bundle.localizedInfoDictionary?["CFBundleName"] as? String {
+            return name
+        }
+        if identifier.hasPrefix("path:") {
+            return URL(fileURLWithPath: String(identifier.dropFirst(5))).deletingPathExtension().lastPathComponent
+        }
+        return identifier
+    }
+
+    private func identifier(forApplicationURL url: URL) -> String {
+        if let bundleID = Bundle(url: url)?.bundleIdentifier, !bundleID.isEmpty {
+            return bundleID
+        }
+        return "path:" + url.standardizedFileURL.path
+    }
+
+    private func reloadApplications() {
+        applications = appOverrides().compactMap { identifier, value in
+            guard let entry = value as? [String: Any],
+                  let root = entry["Root"] as? [String: Any],
+                  let scroll = root["Scroll"] as? [String: Any],
+                  scroll["smooth"] as? String == "off" else { return nil }
+            let url = applicationURL(for: identifier)
+            return ExcludedApplication(identifier: identifier, name: displayName(for: identifier, url: url), url: url)
+        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+
+        tableView.reloadData()
+        emptyLabel.isHidden = !applications.isEmpty
+        removeButton.isEnabled = tableView.numberOfSelectedRows > 0
+    }
+
+    @objc private func addApplication() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        if #available(macOS 11.0, *) {
+            panel.allowedContentTypes = [.application]
+        } else {
+            panel.allowedFileTypes = ["app"]
+        }
+        panel.prompt = MFLocalizedString(
+            "apps-smooth-exclusions.choose",
+            comment: "Confirmation button in the panel for choosing apps to exclude from smooth scrolling."
+        )
+        panel.directoryURL = FileManager.default.urls(for: .applicationDirectory, in: .localDomainMask).first
+
+        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self, response == .OK, !panel.urls.isEmpty else { return }
+            let selectedIdentifiers = panel.urls.map(self.identifier(forApplicationURL:))
+            for identifier in selectedIdentifiers {
+                let keyPath = "AppOverrides.\(self.escapedIdentifier(identifier)).Root.Scroll.smooth"
+                setConfig(keyPath, "off" as NSString)
+            }
+            commitConfig()
+            self.reloadApplications()
+            let selectedRows = IndexSet(self.applications.indices.filter { selectedIdentifiers.contains(self.applications[$0].identifier) })
+            self.tableView.selectRowIndexes(selectedRows, byExtendingSelection: false)
+            if let firstRow = selectedRows.first {
+                self.tableView.scrollRowToVisible(firstRow)
+            }
+        }
+
+        if let window = MainAppState.shared.window {
+            panel.beginSheetModal(for: window, completionHandler: completion)
+        } else {
+            completion(panel.runModal())
+        }
+    }
+
+    @objc private func removeApplication() {
+        let selectedApplications = tableView.selectedRowIndexes.compactMap { row in
+            applications.indices.contains(row) ? applications[row] : nil
+        }
+        guard !selectedApplications.isEmpty else { return }
+
+        for application in selectedApplications {
+            let keyPath = "AppOverrides.\(escapedIdentifier(application.identifier)).Root.Scroll.smooth"
+            removeFromConfig(keyPath)
+        }
+        Config.shared().cleanConfig()
+        reloadApplications()
     }
 }
