@@ -32,6 +32,8 @@
 import Cocoa
 import UniformTypeIdentifiers
 
+private let smoothScrollExclusionTabSize = NSSize(width: 420, height: 260)
+
 class TabViewController: NSTabViewController {
     
     // MARK: Vars
@@ -555,7 +557,7 @@ class TabViewController: NSTabViewController {
         /// Keep it bounded so the measurement pass cannot retain the probe size.
         let tabIdentifier = tabViewItem.identifier as? String
         if tabIdentifier == "apps" {
-            tabViewSizes[tabViewItem] = NSSize(width: 420, height: 260)
+            tabViewSizes[tabViewItem] = smoothScrollExclusionTabSize
         }
 
         /// Get the stored size of the tab we're switching to
@@ -831,8 +833,7 @@ private final class SmoothScrollExclusionTabViewController: NSViewController, NS
     private var applications: [ExcludedApplication] = []
 
     override func loadView() {
-        let root = NSView()
-        root.translatesAutoresizingMaskIntoConstraints = false
+        let root = NSView(frame: NSRect(origin: .zero, size: smoothScrollExclusionTabSize))
 
         let contentContainer = NSView()
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -919,8 +920,6 @@ private final class SmoothScrollExclusionTabViewController: NSViewController, NS
         contentContainer.addSubview(buttonRow)
 
         NSLayoutConstraint.activate([
-            root.widthAnchor.constraint(equalToConstant: 420),
-            root.heightAnchor.constraint(equalToConstant: 260),
             contentContainer.widthAnchor.constraint(equalToConstant: 372),
             contentContainer.heightAnchor.constraint(equalToConstant: 220),
             contentContainer.centerXAnchor.constraint(equalTo: root.centerXAnchor),
