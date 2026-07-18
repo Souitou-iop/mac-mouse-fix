@@ -3,8 +3,6 @@ THE ORIGINAL PROJECT README CONTENT IS AUTOMATICALLY GENERATED.
 THE FORK OVERVIEW IS MAINTAINED MANUALLY IN THIS REPOSITORY.
 -->
 
-<p align="right"><strong>English</strong> | <a href="README.zh-CN.md">简体中文</a></p>
-
 <details>
 <summary>󠁧󠁿🇬🇧 English</summary>
 
