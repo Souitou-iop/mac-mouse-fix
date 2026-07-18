@@ -94,6 +94,15 @@ static NSMutableDictionary *_swipeInfo;
 }
 
 + (void)postDockSwipeEventWithDelta:(double)d type:(MFDockSwipeType)type phase:(IOHIDEventPhaseBits)phase invertedFromDevice:(BOOL)invertedFromDevice {
+
+    CGEventRef event = CGEventCreate(NULL);
+    CGPoint eventPosition = event ? CGEventGetLocation(event) : CGPointZero;
+    if (event) CFRelease(event);
+
+    [self postDockSwipeEventWithDelta:d type:type phase:phase invertedFromDevice:invertedFromDevice atPosition:eventPosition];
+}
+
++ (void)postDockSwipeEventWithDelta:(double)d type:(MFDockSwipeType)type phase:(IOHIDEventPhaseBits)phase invertedFromDevice:(BOOL)invertedFromDevice atPosition:(CGPoint)eventPosition {
     
     /// macOS 27 fix notes: (CGEventFields are now ignored, instead it relies on an IOHIDEvent) (See exploration in FixDockSwipes.m)
     ///     Problems/TODOs: (macOS 27 Beta 2)
@@ -201,6 +210,8 @@ static NSMutableDictionary *_swipeInfo;
         [hidEvent setIntegerValue: type                             forField: kIOHIDEventFieldDockSwipeMotion];
         [hidEvent setIntegerValue: kIOHIDGestureFlavorDockPrimary   forField: kIOHIDEventFieldDockSwipeFlavor];
         [hidEvent setDoubleValue: __dockSwipeOriginOffset           forField: kIOHIDEventFieldDockSwipeProgress];
+        [hidEvent setDoubleValue: eventPosition.x                   forField: kIOHIDEventFieldDockSwipePositionX];
+        [hidEvent setDoubleValue: eventPosition.y                   forField: kIOHIDEventFieldDockSwipePositionY];
         
         /// Attach velocity event on exit
         if (phase == kIOHIDEventPhaseEnded || phase == kIOHIDEventPhaseCancelled) {
@@ -267,6 +278,8 @@ static NSMutableDictionary *_swipeInfo;
         
         CGEventSetDoubleValueField(e30, 123, type); /// Horizontal or vertical
         CGEventSetDoubleValueField(e30, 165, type); /// Horizontal or vertical // Probs not necessary
+        CGEventSetDoubleValueField(e30, 125, eventPosition.x);
+        CGEventSetDoubleValueField(e30, 126, eventPosition.y);
         
         CGEventSetIntegerValueField(e30, 136, invertedFromDevice ? 1 : 0);
         
@@ -297,6 +310,11 @@ static NSMutableDictionary *_swipeInfo;
     if (e30) CGEventPost(kCGSessionEventTap, e30); /// Not sure if order matters
     if (e29) CGEventPost(kCGSessionEventTap, e29); /// This is NULL on macOS 27. Doesn't cause issues but logs `invalid CGEvent: 0x0` error.
     
+    BOOL shouldReplayEndEvent = phase == kIOHIDEventPhaseEnded || phase == kIOHIDEventPhaseCancelled;
+    if (@available(macOS 27.0, *)) {
+        shouldReplayEndEvent = NO;
+    }
+
     if (phase == kIOHIDEventPhaseBegan) {
         
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -314,10 +332,11 @@ static NSMutableDictionary *_swipeInfo;
             _tripleSendTimer = nil;
         });
         
-    } else if (phase == kIOHIDEventPhaseEnded || phase == kIOHIDEventPhaseCancelled) {
+    } else if (shouldReplayEndEvent) {
 
         /// Double-send end-events
         /// Notes:
+        ///     - macOS 27 skips these delayed replays so stale HID payloads cannot affect a later gesture.
         ///     - The inital dockSwipe event we post will be ignored by the system when it is under load (I called this the "stuck bug" in other places). Sending the event again with a delay of 200ms (0.2s) gets it unstuck almost always. Sending the event twice gives us the best of both responsiveness and reliability.
         ///     - In Scroll.m, even with sending the event again after 0.2 seconds, the stuck bug still happens a bunch for some reason. Even though this almost completely eliminates the bug in ModifiedDrag.m . Sending it again after 0.5 seconds works better but still sometimes happens.
         ///         Edit: Doesn't happen anymore on M1. Edit 2: [Feb 2025] The double-sending code used to be broken for a while (fixed in e8f90d2f32829e3e5f1621fa8e4b58634c9ea07b) . Maybe that's why we observed the stuck-bug for Scroll.m here?
@@ -376,4 +395,3 @@ static NSMutableDictionary *_swipeInfo;
 
 
 @end
-
