@@ -501,13 +501,8 @@ class TabViewController: NSTabViewController {
         /// Guard
         guard let tabViewItem = tabViewItem else { return }
         
-        /// Constants
-        var fadeInCurve = CAMediaTimingFunction(controlPoints: 0.65, 0, 1, 1) /* strong ease in*/
-        var fadeOutCurve = CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1) /* default */
-        
-        /// New curves for new spring animations
-        fadeInCurve = CAMediaTimingFunction(controlPoints: 0.25, 0, 1, 1)
-        fadeOutCurve = CAMediaTimingFunction(controlPoints: 0.0, 1.0, 0.25, 1)
+        /// Fade the outgoing screenshot away while the destination remains fully opaque.
+        let fadeOutCurve = CAMediaTimingFunction(controlPoints: 0.0, 1.0, 0.25, 1)
         
         /// Resize window and stuff
         ///     Doing this here in didSelect instead of in willSelect makes the animation smoother for some reason
@@ -518,17 +513,12 @@ class TabViewController: NSTabViewController {
         resizeDuration *= 0.9 /// Because spring animations take long to settle
         let fadeDuration = resizeDuration /* max(0.135, resizeDuration) */
         
-        if let fadeInView = tabViewItem.view?.subviews[0] {
+        if let destinationContentView = tabViewItem.view?.subviews[0] {
             
             unselectedTabImageView.wantsLayer = true
-            fadeInView.wantsLayer = true /// If we don't set wantsLayer true, then the animation will only start working after the first time?
             unselectedTabImageView.alphaValue = 1.0
-            fadeInView.alphaValue = 0 /// This doesn't work, need to do it in willSelect for some reason...
-            
-            /// Fade in
-            Animate.with(CABasicAnimation(curve: fadeInCurve, duration: fadeDuration)) {
-                fadeInView.reactiveAnimator().alphaValue.set(1)
-            }
+            destinationContentView.alphaValue = 1.0
+
             /// Fade out
             Animate.with(CABasicAnimation(curve: fadeOutCurve, duration: fadeDuration)) {
                 unselectedTabImageView.reactiveAnimator().alphaValue.set(0)
